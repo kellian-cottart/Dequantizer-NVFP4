@@ -59,7 +59,7 @@ Ex:
     "format": "pt" 
   },
   "model.layers.0.mlp.up_proj.weight": { 
-    "dtype": "U8",    
+    "dtype": "U8",  
     "shape": [14336, 2048], 
     "data_offsets": [0, 29360128] 
   },
@@ -69,7 +69,7 @@ Ex:
     "data_offsets": [29360128, 33030144] },
   "model.layers.0.mlp.up_proj.weight_scale_2": { 
     "dtype": "F32",   
-    "shape": [],          
+    "shape": [],      
     "data_offsets": [33030144, 33030148] 
   }
 }
@@ -103,15 +103,16 @@ I'll work on `0.17.0', which is the latest stable version at the time of writing
 
 ### Documentation
 
-- https://ziglang.org/documentation/0.17.0/: The official Zig documentation for my version (`master` documents the dev version)
-- https://ziglang.org/download/0.16.0/release-notes.html: The big `std.Io` rework (files, threads, sync primitives); most tutorials online predate it
-- https://ziglang.org/download/0.17.0/release-notes.html: Changes since 0.16 (`@bitCast` on vectors, build system renames)
+- [https://ziglang.org/documentation/0.17.0/](https://ziglang.org/documentation/0.17.0/): The official Zig documentation for my version (`master` documents the dev version)
+- [https://ziglang.org/download/0.16.0/release-notes.html](https://ziglang.org/download/0.16.0/release-notes.html): The big `std.Io` rework (files, threads, sync primitives); most tutorials online predate it
+- [https://ziglang.org/download/0.17.0/release-notes.html](https://ziglang.org/download/0.17.0/release-notes.html): Changes since 0.16 (`@bitCast` on vectors, build system renames)
+- [gist.github.com/ityonemo/769532c2017ed9143f3571e5ac104e50](https://gist.github.com/ityonemo/769532c2017ed9143f3571e5ac104e50): a half hour to learn Zig, the basics of the language.
 
 **Old projects from the team at ZML**
 
-- https://github.com/erwanvivien/nvfp4-dequant
-- https://github.com/pierrelgol/nvfp4-dequantizer
-- https://github.com/tgautie/zig_mxfp4_dequantizer
+- [https://github.com/erwanvivien/nvfp4-dequant](https://github.com/erwanvivien/nvfp4-dequant)
+- [https://github.com/pierrelgol/nvfp4-dequantizer](https://github.com/pierrelgol/nvfp4-dequantizer)
+- [https://github.com/tgautie/zig_mxfp4_dequantizer](https://github.com/tgautie/zig_mxfp4_dequantizer)
 
 ### Zig cheat sheet
 
@@ -175,6 +176,7 @@ There is a `comptime` keyword that allows to execute code at compile time, which
 ### To Do LIST
 
 - Download a small NVFP4 checkpoint into `data/` and read its header by hand
+- [gist.github.com/ityonemo/769532c2017ed9143f3571e5ac104e50](https://gist.github.com/ityonemo/769532c2017ed9143f3571e5ac104e50): Read a half hour to learn Zig
 
 ## Open Questions
 
