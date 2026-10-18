@@ -1,0 +1,15 @@
+# Zig build artifacts
+.zig-cache/
+zig-cache/
+zig-out/
+
+# Model files and reference outputs (large, never committed)
+data/
+*.safetensors
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
