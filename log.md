@@ -91,6 +91,38 @@ Warning: Large models are split into several `.safetensors` files, and the tenso
 
 - https://huggingface.co/nvidia/Nemotron-3-Embed-1B-NVFP4: Nemotron-3-Embed-1B-NVFP4 is the quantized version of the Nemotron-3-Embed-1B-BF16 model by NVIDIA Model Optimizer.
 
+### The crux of this project: FP4 dequantization
+
+NVFP4 combines three number formats: 4-bit values (E2M1), an 8-bit scale per block (E4M3), and a 32-bit scale per tensor (F32).
+
+#### FP4 E2M1 (the values)
+
+- 4 bits: `s e e m` (1 sign, 2 exponent, 1 mantissa), exponent bias 1.
+- Normal (`e != 0`): `(-1)^s * 2^(e - 1) * (1 + m/2)`
+- Subnormal (`e == 0`): `(-1)^s * 0.5 * m` (so `0` or `0.5`)
+- No infinity, no NaN.
+- Only 16 possible codes, 8 magnitudes: `0, 0.5, 1, 1.5, 2, 3, 4, 6`. Max = 6.
+- Packed two per byte (stored as `U8` in safetensors).
+
+#### FP8 E4M3 (the block scales)
+
+- 8 bits: 1 sign, 4 exponent, 3 mantissa, exponent bias 7.
+- Normal (`e != 0`): `(-1)^s * 2^(e - 7) * (1 + m/8)`
+- Subnormal (`e == 0`): `(-1)^s * 2^(-6) * (m/8)`
+- No infinity. NaN = `S.1111.111` only, so `e == 15` is still a valid normal exponent for the other mantissas.
+- Max = 448 (`0.1111.110`), smallest subnormal = 2^-9.
+
+#### NVFP4 (NVIDIA)
+
+- Blocks of **16** E2M1 values sharing one **E4M3** scale, plus one **F32** scale per tensor.
+- `value = e2m1 * e4m3_block_scale * f32_tensor_scale`
+- In a ModelOpt-style checkpoint:
+  - `X.weight`: `U8`, shape `[rows, cols/2]` (packed nibbles)
+  - `X.weight_scale`: `F8_E4M3`, shape `[rows, cols/16]`
+  - `X.weight_scale_2`: `F32`, scalar
+- Compared with MXFP4: smaller blocks and a scale with real mantissa bits (E4M3 vs a pure power of two) give finer scaling, so lower error. The F32 tensor scale makes up for E4M3's limited range (max 448).
+
+
 ## Zig
 
 ### Versionning
