@@ -5,7 +5,7 @@ set -euo pipefail
 
 REPO="nvidia/Nemotron-3-Embed-1B-NVFP4"
 FILES=("model.safetensors" "hf_quant_config.json" "config.json")
-DEST="$(cd "$(dirname "$0")" && pwd)/data"
+DEST="data"
 
 mkdir -p "$DEST"
 
