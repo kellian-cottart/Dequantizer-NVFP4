@@ -69,7 +69,7 @@ Ex:
     "data_offsets": [29360128, 33030144] },
   "model.layers.0.mlp.up_proj.weight_scale_2": { 
     "dtype": "F32",   
-    "shape": [],      
+    "shape": [],  
     "data_offsets": [33030144, 33030148] 
   }
 }
@@ -95,14 +95,20 @@ Warning: Large models are split into several `.safetensors` files, and the tenso
 
 NVFP4 combines three number formats: 4-bit values (E2M1), an 8-bit scale per block (E4M3), and a 32-bit scale per tensor (F32).
 
+[docs.nvidia.com/deeplearning/transformer-engine-releases/release-2.14/user-guide/features/low_precision_training/nvfp4/nvfp4.html](https://docs.nvidia.com/deeplearning/transformer-engine-releases/release-2.14/user-guide/features/low_precision_training/nvfp4/nvfp4.html): docs from nvidia
+
 #### FP4 E2M1 (the values)
 
 - 4 bits: `s e e m` (1 sign, 2 exponent, 1 mantissa), exponent bias 1.
 - Normal (`e != 0`): `(-1)^s * 2^(e - 1) * (1 + m/2)`
 - Subnormal (`e == 0`): `(-1)^s * 0.5 * m` (so `0` or `0.5`)
-- No infinity, no NaN.
 - Only 16 possible codes, 8 magnitudes: `0, 0.5, 1, 1.5, 2, 3, 4, 6`. Max = 6.
 - Packed two per byte (stored as `U8` in safetensors).
+
+They're usually stored in uint8, containing 4 bits of lower nibble and 4 bits of upper nibble. If a byte has the hexadecimal value 0x71 (binary 0111 0001):
+
+- Lower nibble (0x1 / 0001): Represents the first E2M1 element (value: 0.5).
+- Upper nibble (0x7 / 0111): Represents the second E2M1 element (value: 6.0). (subnormal)
 
 #### FP8 E4M3 (the block scales)
 
@@ -121,7 +127,6 @@ NVFP4 combines three number formats: 4-bit values (E2M1), an 8-bit scale per blo
   - `X.weight_scale`: `F8_E4M3`, shape `[rows, cols/16]`
   - `X.weight_scale_2`: `F32`, scalar
 - Compared with MXFP4: smaller blocks and a scale with real mantissa bits (E4M3 vs a pure power of two) give finer scaling, so lower error. The F32 tensor scale makes up for E4M3's limited range (max 448).
-
 
 ## Zig
 
@@ -178,16 +183,6 @@ Tests in Zig are written in `test` blocks, which can be placed anywhere in the c
 
 - https://ziglang.org/documentation/0.17.0/#Zig-Test: The official testing chapter for my version.
 
-### Multi-core
-
-Since 0.16, concurrency goes through the `std.Io` interface: `io.async(func, .{args})` returns a `Future` that I `await` (or `cancel`), `io.concurrent(...)` is for work that must truly run in parallel (it can fail with `error.ConcurrencyUnavailable`), and `std.Io.Group` handles many tasks with one lifetime. `std.Io.Threaded` is the thread-based implementation that `main` gets by default. `std.Thread.Pool` was removed, and the sync primitives moved to `std.Io` (`std.Io.Mutex`, `Condition`, `RwLock`, `Semaphore`, `ResetEvent`; `WaitGroup` became `std.Io.Group`). Atomics are still `std.atomic.Value`.
-
-The best practice is to need as few of these as possible: give each task its own contiguous range of the output and its own allocator, so no locks are needed, and pad per-task data to a cache line to avoid false sharing.
-
-> `await` returns the task's result, errors included. Raw `std.Thread.spawn` + `join()` does not pass errors back.
-
-For this project, threads come last: threading should be added only if it is a bottleneck. Hence, first I will measure speed and do my best to see how that works.
-
 ### JSON
 
 Zig can handle JSON through `std.json`, which is a streaming parser that can parse JSON from a `std.Io.Reader` and produce a `std.json.Value` that can be traversed.
@@ -198,6 +193,29 @@ To select what to do based on the `dtype` of the tensor, I will use a `switch` s
 
 There is a `comptime` keyword that allows to execute code at compile time, which is useful for generating code based on the `dtype` of the tensor.
 
+### Timing
+
+In Zig v0.17 , timing is done through `std.Io.Timestamp`, which can be used to measure the time taken by a block of code. It changed from `std.time` in v0.16.
+
+```zig
+const start = std.Io.Timestamp.now(io, .awake);
+for (0..iters) |_| {
+    fn(fn, params, out);
+    std.mem.doNotOptimizeAway(out.ptr);
+}
+const ns = start.untilNow(io, .awake).nanoseconds;
+```
+
+### Multi-core
+
+Since 0.16, concurrency goes through the `std.Io` interface: `io.async(func, .{args})` returns a `Future` that I `await` (or `cancel`), `io.concurrent(...)` is for work that must truly run in parallel (it can fail with `error.ConcurrencyUnavailable`), and `std.Io.Group` handles many tasks with one lifetime. `std.Io.Threaded` is the thread-based implementation that `main` gets by default. `std.Thread.Pool` was removed, and the sync primitives moved to `std.Io` (`std.Io.Mutex`, `Condition`, `RwLock`, `Semaphore`, `ResetEvent`; `WaitGroup` became `std.Io.Group`). Atomics are still `std.atomic.Value`.
+
+The best practice is to need as few of these as possible: give each task its own contiguous range of the output and its own allocator, so no locks are needed, and pad per-task data to a cache line to avoid false sharing.
+
+> `await` returns the task's result, errors included. Raw `std.Thread.spawn` + `join()` does not pass errors back.
+
+For this project, threads come last: threading should be added only if it is a bottleneck. Hence, first I will measure speed and do my best to see how that works.
+
 ## Journal
 
 ### 18/10/2026
@@ -205,10 +223,11 @@ There is a `comptime` keyword that allows to execute code at compile time, which
 - Documented the project and its goals, as well as the tools and resources that I will use to implement it.
 - Read the `safetensors` format specification and understood how to read the header and the tensor metadata.
 
-### To Do LIST
+### 19/10/2026
 
-- Download a small NVFP4 checkpoint into `data/` and read its header by hand
-- [gist.github.com/ityonemo/769532c2017ed9143f3571e5ac104e50](https://gist.github.com/ityonemo/769532c2017ed9143f3571e5ac104e50): Read a half hour to learn Zig
+- Wrote formatConversion.zig, which contains the functions to dequantize the NVFP4 values into `f32` values.
+- Started looking at SIMD and `@Vector` in Zig, to see how to implement the dequantization in a vectorized way.
+- Started looking at how to benchmark the two implementations, and see if multicore is even worth it in the first place: what is the bottleneck? I/O or CPU? If I/O, then multicore won't help much. If CPU, then multicore could help a lot.
 
 ## Open Questions
 
