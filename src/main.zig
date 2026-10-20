@@ -1,71 +1,47 @@
 const std = @import("std");
 const Io = std.Io;
+const read = @import("Dequantizer").read;
+const dispatch = @import("Dequantizer").dispatch;
 
-const Dequantizer_NVFP4 = @import("Dequantizer_NVFP4");
-
+/// Writing a little writer to read a file and print its contents to stdout, using the new std.Io interface.
+/// https://zig.guide/standard-library/readers-and-writers/ (for 0.15.2)
 pub fn main(init: std.process.Init) !void {
-    // Prints to stderr, unbuffered, ignoring potential errors.
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
 
-    // This is appropriate for anything that lives as long as the process.
-    const arena: std.mem.Allocator = init.arena.allocator();
-
-    // Accessing command line arguments:
-    const args = try init.minimal.args.toSlice(arena);
-    for (args) |arg| {
-        std.log.info("arg: {s}", .{arg});
-    }
-
-    // In order to do I/O operations need an `Io` instance.
+    // Initialize the std.io interface
     const io = init.io;
 
-    // Stdout is for the actual output of your application, for example if you
-    // are implementing gzip, then only the compressed bytes should be sent to
-    // stdout, not any debugging messages.
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
-    const stdout_writer = &stdout_file_writer.interface;
+    // Initialize shared memory
+    const allocator = init.arena.allocator();
 
-    try Dequantizer_NVFP4.printAnotherMessage(stdout_writer);
+    const filename = "src/testdata/tiny_nvfp4.safetensors";
 
-    try stdout_writer.flush(); // Don't forget to flush!
+    // Open the file here, the tensors will be read from it later
+    const file = try Io.Dir.cwd().openFile(io, filename, .{});
+    defer file.close(io);
+
+    // Get the structure of the file
+    const parsed = try get_structure(allocator, io, file);
+    defer parsed.deinit();
+
+    // Create the jobList
+    var jobList: std.ArrayList(read.Nvfp4Tensor) = .empty;
+    defer jobList.deinit(allocator);
+
+    // Collect the jobs
+    try read.collect_nvfp4(allocator, &parsed.value.map, &jobList);
+
+    // We have the job list!
+    std.debug.print("\n{any}\n", .{jobList.items[0]});
+
+    // now we must give the jobs
 }
 
-test "simple test" {
-    const gpa = std.testing.allocator;
-    var list: std.ArrayList(i32) = .empty;
-    defer list.deinit(gpa); // Try commenting this out and see if zig detects the memory leak!
-    try list.append(gpa, 42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
-}
+pub fn get_structure(allocator: std.mem.Allocator, io: Io, file: Io.File) !std.json.Parsed(std.json.ArrayHashMap(read.TensorInfo)) {
+    // Create a reader to read the header from the file
+    var read_buf: [64 * 1024]u8 = undefined;
+    var file_reader = file.reader(io, &read_buf);
 
-test "fuzz example" {
-    try std.testing.fuzz({}, testOne, .{});
-}
-
-fn testOne(context: void, smith: *std.testing.Smith) !void {
-    _ = context;
-    // Try command `zig build test --fuzz -Doptimize=ReleaseFast` to see if it manages to fail this test case!
-
-    const gpa = std.testing.allocator;
-    var list: std.ArrayList(u8) = .empty;
-    defer list.deinit(gpa);
-    while (!smith.eos()) switch (smith.value(enum { add_data, dup_data })) {
-        .add_data => {
-            const slice = try list.addManyAsSlice(gpa, smith.value(u4));
-            smith.bytes(slice);
-        },
-        .dup_data => {
-            if (list.items.len == 0) continue;
-            if (list.items.len > std.math.maxInt(u32)) return error.SkipZigTest;
-            const len = smith.valueRangeAtMost(u32, 1, @min(32, list.items.len));
-            const off = smith.valueRangeAtMost(u32, 0, @intCast(list.items.len - len));
-            try list.appendSlice(gpa, list.items[off..][0..len]);
-            try std.testing.expectEqualSlices(
-                u8,
-                list.items[off..][0..len],
-                list.items[list.items.len - len ..],
-            );
-        },
-    };
+    // Read the json header (length + header itself), then parse it
+    const json = try read.read_header_json(allocator, &file_reader);
+    return read.parse_header(allocator, json);
 }
