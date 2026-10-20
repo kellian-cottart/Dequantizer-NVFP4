@@ -1,7 +1,10 @@
-# Zig build artifacts
 .zig-cache/
-zig-cache/
 zig-out/
+/release/
+/debug/
+/build/
+/build-*/
+/docgen_tmp/
 
 # Model files and reference outputs (large, never committed)
 data/
@@ -15,5 +18,3 @@ data/
 Thumbs.db
 
 !src/testdata/*.safetensors
-build.zig
-build.zig.zon
