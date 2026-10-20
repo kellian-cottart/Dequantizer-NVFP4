@@ -15,3 +15,5 @@ data/
 Thumbs.db
 
 !src/testdata/*.safetensors
+build.zig
+build.zig.zon
