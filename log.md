@@ -117,6 +117,7 @@ They're usually stored in uint8, containing 4 bits of lower nibble and 4 bits of
 - Subnormal (`e == 0`): `(-1)^s * 2^(-6) * (m/8)`
 - No infinity. NaN = `S.1111.111` only, so `e == 15` is still a valid normal exponent for the other mantissas.
 - Max = 448 (`0.1111.110`), smallest subnormal = 2^-9.
+- There seems to be confusion about E4M3: is it unsigned or signed? I can only see E4M3 in the docs as a signed implementation. I'll keep it signed for now. (https://docs.nvidia.com/cuda/pdf/ptx_isa_9.2.pdf)
 
 #### NVFP4 (NVIDIA)
 
@@ -144,6 +145,9 @@ I'll work on `0.17.0', which is the latest stable version at the time of writing
 - [https://ziglang.org/download/0.16.0/release-notes.html](https://ziglang.org/download/0.16.0/release-notes.html): The big `std.Io` rework (files, threads, sync primitives); most tutorials online predate it
 - [https://ziglang.org/download/0.17.0/release-notes.html](https://ziglang.org/download/0.17.0/release-notes.html): Changes since 0.16 (`@bitCast` on vectors, build system renames)
 - [gist.github.com/ityonemo/769532c2017ed9143f3571e5ac104e50](https://gist.github.com/ityonemo/769532c2017ed9143f3571e5ac104e50): a half hour to learn Zig, the basics of the language.
+- [mojoauth.com/dev-guides/serialize-and-deserialize-json-with-zig](https://mojoauth.com/dev-guides/serialize-and-deserialize-json-with-zig): deserialize json with zig
+- [Ziggit: How to parse arbitrary JSON data with std.json?](https://ziggit.dev/t/how-to-parse-arbitrary-json-data-with-std-json/13437): parse an arbitrary json with zig
+- [Hugging Face: safetensors metadata parsing](https://huggingface.co/docs/safetensors/metadata_parsing): safetensor parsing
 
 **Old projects from the team at ZML**
 
@@ -187,6 +191,24 @@ Tests in Zig are written in `test` blocks, which can be placed anywhere in the c
 
 Zig can handle JSON through `std.json`, which is a streaming parser that can parse JSON from a `std.Io.Reader` and produce a `std.json.Value` that can be traversed.
 
+### Reading of a file
+
+Reading the file sequentially is not a good way to do it, because the file can be large and the tensors can be scattered across the file. If I was to store every position of the tensors in memory, then act of the arrays one by one, it wouldn't be efficient.
+
+Chunking seems to be the good intuition: NVFP4 takes blocks of 16 values, and the scales are stored in blocks of 16 as well.
+
+How do I retrieve the scales for each block first, then the values for each block?
+
+I could put one reading pointer at the sector of the scales, and one reading pointer at the sector of the values, and read them in parallel. The sector of the values needs to have chunking, because more values could be complicated to handle.
+
+Scheme:
+
+1. Retrieve the header informations. => Struct?
+2. Keep output offsets
+3. Filter by NVFP4 (combination of U8 + F8_E4M3 + F32) => Struct? + array of structs
+4. Read the values with a `io.Reader`
+5. Dispatch jobs ? Where to multiprocess?
+
 ### Comptime, Switches
 
 To select what to do based on the `dtype` of the tensor, I will use a `switch` statement.
@@ -210,8 +232,6 @@ const ns = start.untilNow(io, .awake).nanoseconds;
 
 Since 0.16, concurrency goes through the `std.Io` interface: `io.async(func, .{args})` returns a `Future` that I `await` (or `cancel`), `io.concurrent(...)` is for work that must truly run in parallel (it can fail with `error.ConcurrencyUnavailable`), and `std.Io.Group` handles many tasks with one lifetime. `std.Io.Threaded` is the thread-based implementation that `main` gets by default. `std.Thread.Pool` was removed, and the sync primitives moved to `std.Io` (`std.Io.Mutex`, `Condition`, `RwLock`, `Semaphore`, `ResetEvent`; `WaitGroup` became `std.Io.Group`). Atomics are still `std.atomic.Value`.
 
-The best practice is to need as few of these as possible: give each task its own contiguous range of the output and its own allocator, so no locks are needed, and pad per-task data to a cache line to avoid false sharing.
-
 > `await` returns the task's result, errors included. Raw `std.Thread.spawn` + `join()` does not pass errors back.
 
 For this project, threads come last: threading should be added only if it is a bottleneck. Hence, first I will measure speed and do my best to see how that works.
@@ -228,13 +248,39 @@ For this project, threads come last: threading should be added only if it is a b
 - Wrote formatConversion.zig, which contains the functions to dequantize the NVFP4 values into `f32` values.
 - Started looking at SIMD and `@Vector` in Zig, to see how to implement the dequantization in a vectorized way.
 - Started looking at how to benchmark the two implementations, and see if multicore is even worth it in the first place: what is the bottleneck? I/O or CPU? If I/O, then multicore won't help much. If CPU, then multicore could help a lot.
+- Investigated the `std.Io` interface and how to use it to read the `.safetensors` file and write the dequantized values to a `std.Io.Writer`. This is cursed. This is Eldritch. The documentation was redacted by horrors from beyond.
+- Wrote the code for reading the header length, the header
+
+Questions:
+
+- Should I allocate the reading block as a function of the matrices? or split it in multiple chunks?
+- What should I do about the other format? Cast them?
+
+### 20/10/2026
+
+- Finished the structure reading of the json
+- Allowed a json structure to map into a job of nvfp4 computations
+- Reworked the main
+- Struggled with the documentation and the ways of sorting/finding elements
+
+What I can do next is write the code for dispatch: 
+
+- write to get the readers where i want them
+- implement chunking
+- implement backend
+- dispatch the chunking on the right backend
+- then SIMD
+- then Multicore
+- and then we're good?
 
 ## Open Questions
 
 - To what format should I dequantize the values? `f32` is the most common format, but it is not the most efficient one. I could use `f16` or `bfloat16`, but they are not supported by all CPUs/GPUs.
   I'll start with `f32` and see how it goes, and defend it if I need to.
-- To what output format should I dequantize the stream? Raw tensor bytes could meet the requirements, and fit into pipelining in another program. But I need to verify that this is the case.
-
-Or another `safetensors` file, but that would require a lot of work to implement, and I don't know if it is worth it. I'll start with raw tensor bytes and see how it goes.
-
+- To what output format should I dequantize the stream? Raw tensor bytes could meet the requirements, and fit into pipelining in another program. But I need to verify that this is the case. Or another `safetensors` file?
 - What to do with non-NVFP4 tensors if any?
+
+## What I'm not going to do
+
+- Verify that the file is not corrupted
+- Verify that the sectors are matching
