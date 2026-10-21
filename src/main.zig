@@ -3,8 +3,26 @@ const Io = std.Io;
 const read = @import("Dequantizer").read;
 const dispatch = @import("Dequantizer").dispatch;
 
-/// Writing a little writer to read a file and print its contents to stdout, using the new std.Io interface.
-/// https://zig.guide/standard-library/readers-and-writers/ (for 0.15.2)
+/// I want to make an application much like in C++
+/// Sorry for the length of the comment but my head will burst if I don't write it down
+/// Our output is a stream of the whole dequantized tensor.
+
+// * Build the jobs (dispatch) :
+//   1. If its a nvfp4 triplet, i mark it dequantize
+//   2. if its a scale, skip
+//   3. if its anything else, copy and hold the position of bytes
+// * Remove the skip jobs
+// * Sort the jobs by position
+// * Build the output header of the job
+// * Stream
+//   1. Give the header + metadata
+//   2. Perform the jobs sequentially
+//      1. Copy: just hand out the bytes (can use mini-jobs later)
+//      2. Dequantize (can use mini-jobs later):
+//         1. Read the scales
+//         2. Read the weights
+//         3. Dequantize them into f32 and handle them out
+
 pub fn main(init: std.process.Init) !void {
 
     // Initialize the std.io interface
@@ -12,36 +30,21 @@ pub fn main(init: std.process.Init) !void {
 
     // Initialize shared memory
     const allocator = init.arena.allocator();
-
     const filename = "src/testdata/tiny_nvfp4.safetensors";
 
-    // Open the file here, the tensors will be read from it later
+    // Open the file
     const file = try Io.Dir.cwd().openFile(io, filename, .{});
     defer file.close(io);
 
-    // Get the structure of the file
-    const parsed = try get_structure(allocator, io, file);
-    defer parsed.deinit();
+    // The dequantizer reads the structure, makes the jobs and builds the header
+    var dequantizer: dispatch.Dequantizer = try .init(allocator, io, file, 256 * 1024);
+    defer dequantizer.deinit();
 
-    // Create the jobList
-    var jobList: std.ArrayList(read.Nvfp4Tensor) = .empty;
-    defer jobList.deinit(allocator);
+    // The output is a buffered writer on stdout
+    var out_buf: [64 * 1024]u8 = undefined;
+    var stdout_writer = Io.File.stdout().writer(io, &out_buf);
 
-    // Collect the jobs
-    try read.collect_nvfp4(allocator, &parsed.value.map, &jobList);
-
-    // We have the job list!
-    std.debug.print("\n{any}\n", .{jobList.items[0]});
-
-    // now we must give the jobs
-}
-
-pub fn get_structure(allocator: std.mem.Allocator, io: Io, file: Io.File) !std.json.Parsed(std.json.ArrayHashMap(read.TensorInfo)) {
-    // Create a reader to read the header from the file
-    var read_buf: [64 * 1024]u8 = undefined;
-    var file_reader = file.reader(io, &read_buf);
-
-    // Read the json header (length + header itself), then parse it
-    const json = try read.read_header_json(allocator, &file_reader);
-    return read.parse_header(allocator, json);
+    // Stream the information to stdout
+    _ = try dequantizer.interface.streamRemaining(&stdout_writer.interface);
+    try stdout_writer.interface.flush();
 }
