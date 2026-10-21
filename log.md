@@ -191,6 +191,20 @@ Tests in Zig are written in `test` blocks, which can be placed anywhere in the c
 
 Zig can handle JSON through `std.json`, which is a streaming parser that can parse JSON from a `std.Io.Reader` and produce a `std.json.Value` that can be traversed.
 
+### Structures
+
+Structures can be made much like in c and c++.
+
+```zig
+pub const Job = struct {
+    name: []const u8,
+    info: TensorInfo,
+    action: Action,
+};
+```
+
+They can also hold pointers on functions that kind of look like methods from OOP classes, allowing to deinit memory if needed.
+
 ### Reading of a file
 
 Reading the file sequentially is not a good way to do it, because the file can be large and the tensors can be scattered across the file. If I was to store every position of the tensors in memory, then act of the arrays one by one, it wouldn't be efficient.
@@ -203,11 +217,71 @@ I could put one reading pointer at the sector of the scales, and one reading poi
 
 Scheme:
 
-1. Retrieve the header informations. => Struct?
-2. Keep output offsets
-3. Filter by NVFP4 (combination of U8 + F8_E4M3 + F32) => Struct? + array of structs
-4. Read the values with a `io.Reader`
-5. Dispatch jobs ? Where to multiprocess?
+1. Retrieve the header informations.
+2. Filter by NVFP4
+3. Retrieve the list of NVFP4 to process
+4. Sort the list by block
+5. Read sequentially the jobs (we're producing a stream)
+6. Split the jobs into chunks
+7. Dispatch the chunks to be multiprocessed?
+
+### Streaming
+
+Ok let's break down what needs to be done here in terms of streaming. The job array is a plan: it depicts what it needs to do and where to do it, and nothing is read. Only when I call the stream will I process the jobs.  So i need only positions to be stored.
+
+Phases:
+
+1. Build the jobs (dispatch) :
+   1. If its a nvfp4 triplet, i mark it dequantize
+   2. if its a scale, skip
+   3. if its anything else, copy and hold the position of bytes
+2. Remove the skip jobs
+3. Sort the jobs by position
+4. Build the output header of the job
+5. Stream
+   1. Give the header + metadata
+   2. Perform the jobs sequentially
+      1. Copy: just hand out the bytes (can use mini-jobs later)
+      2. Dequantize (can use mini-jobs later):
+         1. Read the scales
+         2. Read the weights
+         3. Dequantize them into f32 and handle them out
+
+### Multi-core
+
+Claude resume:
+
+Since 0.16, concurrency goes through the `std.Io` interface: `io.async(func, .{args})` returns a `Future` that I `await` (or `cancel`), `io.concurrent(...)` is for work that must truly run in parallel (it can fail with `error.ConcurrencyUnavailable`), and `std.Io.Group` handles many tasks with one lifetime. `std.Io.Threaded` is the thread-based implementation that `main` gets by default. `std.Thread.Pool` was removed, and the sync primitives moved to `std.Io` (`std.Io.Mutex`, `Condition`, `RwLock`, `Semaphore`, `ResetEvent`; `WaitGroup` became `std.Io.Group`). Atomics are still `std.atomic.Value`.
+
+> `await` returns the task's result, errors included. Raw `std.Thread.spawn` + `join()` does not pass errors back.
+
+If I want to make it multi-core, I must plan ahead and figure out the most efficient way to do it, because a bad plan leads to a nightmare. I'm kinda up for the task of making a batch-like yielder. I don't think I'll make it much more efficient because the time to get it better is very high.
+
+First, we need to know what to do with the types that are of no interest to the dequantizer. Once we have our structure, we can create an array of job with some kind of "action" and depending on the action, we know what to yield to the reader
+
+What I'm currently thinking of is that:
+
+- We have an array of jobs
+- A job can be composed of minijobs: a minijob holds scale_1, scale_2, the position of the weights
+- It raises the question of how to keep the ordering consistent, what if a job that comes later finishes first? Naive implementation: we have batches of roughly the same size, the compute time should stay consistent, it's okay to wait for the first time and pay the eventual overhead of the end of the batch.
+- How do we face the reading contention? Maybe we initialize a reader with a big buffer and then dispatch to the cpu
+- To read the position of the weights, there's the function `seekTo` in the reader.
+
+What we can have is then:
+
+- An array of jobs
+- A for jobs in array,
+- One job,
+- A while the job isn't finished,
+- A big reader taking a big slot of the memory (probably a function of the number of cpu/available threads like 8xN),
+- Dispatch the reads to workers by creating a minijob that has scale_1, scale_2 and the position of the weights it has to compute,
+- Wait for each thread sequentially to come back
+- Increase the position of the big reader
+- Finish while
+- Finish for
+- Close the queue
+
+Raw f32 of the NVFP4 tensors, in file order? What happens to the BF16 tensors, which are half of the real file?
 
 ### Comptime, Switches
 
@@ -227,14 +301,6 @@ for (0..iters) |_| {
 }
 const ns = start.untilNow(io, .awake).nanoseconds;
 ```
-
-### Multi-core
-
-Since 0.16, concurrency goes through the `std.Io` interface: `io.async(func, .{args})` returns a `Future` that I `await` (or `cancel`), `io.concurrent(...)` is for work that must truly run in parallel (it can fail with `error.ConcurrencyUnavailable`), and `std.Io.Group` handles many tasks with one lifetime. `std.Io.Threaded` is the thread-based implementation that `main` gets by default. `std.Thread.Pool` was removed, and the sync primitives moved to `std.Io` (`std.Io.Mutex`, `Condition`, `RwLock`, `Semaphore`, `ResetEvent`; `WaitGroup` became `std.Io.Group`). Atomics are still `std.atomic.Value`.
-
-> `await` returns the task's result, errors included. Raw `std.Thread.spawn` + `join()` does not pass errors back.
-
-For this project, threads come last: threading should be added only if it is a bottleneck. Hence, first I will measure speed and do my best to see how that works.
 
 ## Journal
 
@@ -263,7 +329,7 @@ Questions:
 - Reworked the main
 - Struggled with the documentation and the ways of sorting/finding elements
 
-What I can do next is write the code for dispatch: 
+What I can do next is write the code for dispatch:
 
 - write to get the readers where i want them
 - implement chunking
