@@ -187,6 +187,8 @@ Tests in Zig are written in `test` blocks, which can be placed anywhere in the c
 
 - https://ziglang.org/documentation/0.17.0/#Zig-Test: The official testing chapter for my version.
 
+For functions returns ! means an error can be returned, ? means null can be returned. !? means maybe both, and you can state the typing with it !?Nvfp4.
+
 ### JSON
 
 Zig can handle JSON through `std.json`, which is a streaming parser that can parse JSON from a `std.Io.Reader` and produce a `std.json.Value` that can be traversed.
