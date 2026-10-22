@@ -1,7 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 const read = @import("Dequantizer").read;
-const dispatch = @import("Dequantizer").dispatch;
+const Dequantizer = @import("Dequantizer").dequantizer.Dequantizer;
 
 /// I want to make an application much like in C++
 /// Sorry for the length of the comment but my head will burst if I don't write it down
@@ -37,7 +37,7 @@ pub fn main(init: std.process.Init) !void {
     defer file.close(io);
 
     // The dequantizer reads the structure, makes the jobs and builds the header
-    var dequantizer: dispatch.Dequantizer = try .init(allocator, io, file, 256 * 1024);
+    var dequantizer: Dequantizer = try .init(allocator, io, file, 256 * 1024);
     defer dequantizer.deinit();
 
     // The output is a buffered writer on stdout

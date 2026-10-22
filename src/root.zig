@@ -1,9 +1,13 @@
-pub const formatConversion = @import("formatConversion.zig");
+pub const backend = struct {
+    pub const scalar = @import("backend/scalar.zig");
+    pub const simd = @import("backend/simd.zig");
+};
 pub const read = @import("read.zig");
-pub const dispatch = @import("dispatch.zig");
+pub const dequantizer = @import("dequantizer.zig");
 
 test {
-    _ = formatConversion;
+    _ = backend.scalar;
+    _ = backend.simd;
     _ = read;
-    _ = dispatch;
+    _ = dequantizer;
 }
