@@ -99,8 +99,7 @@ test "create a job" {
             try jobList.append(heapAllocator, newJob);
         }
     }
-
-    // 13 tensors, the 3 satellites of a are skipped, we expect 10 jobs
+    // 13 tensors, the 3 scales of a are skipped, so we have 10 jobs
     try std.testing.expectEqual(10, jobList.items.len);
 
     // null means skipped

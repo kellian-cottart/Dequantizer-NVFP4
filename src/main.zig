@@ -4,14 +4,12 @@ const read = @import("Dequantizer").read;
 const Dequantizer = @import("Dequantizer").dequantizer.Dequantizer;
 
 /// I want to make an application much like in C++
-/// Sorry for the length of the comment but my head will burst if I don't write it down
 /// Our output is a stream of the whole dequantized tensor.
 
 // * Build the jobs (dispatch) :
 //   1. If its a nvfp4 triplet, i mark it dequantize
 //   2. if its a scale, skip
 //   3. if its anything else, copy and hold the position of bytes
-// * Remove the skip jobs
 // * Sort the jobs by position
 // * Build the output header of the job
 // * Stream
@@ -37,6 +35,7 @@ pub fn main(init: std.process.Init) !void {
     defer file.close(io);
 
     // The dequantizer reads the structure, makes the jobs and builds the header
+    // 256 * 1024 is adjustable
     var dequantizer: Dequantizer = try .init(allocator, io, file, 256 * 1024);
     defer dequantizer.deinit();
 
