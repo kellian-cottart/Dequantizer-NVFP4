@@ -1,7 +1,5 @@
 const std = @import("std");
 const read = @import("../read.zig");
-const header = @import("header.zig");
-const stream = @import("stream.zig");
 
 // This is the information about the NVFP4 that has associated typing, we won't need the scales after dequantization
 pub const Nvfp4Tensor = struct {
