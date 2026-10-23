@@ -315,6 +315,39 @@ Phases:
          2. Read the weights
          3. Dequantize them into f32 and handle them out
 
+Turns out that one of the worst things in a programmmer's life is to find out the lack of documentation on a library due to a release just being done.  
+
+The full documentation of the `std.Io.Reader` interface is here: https://github.com/ziglang/zig/blob/master/lib/std/Io/Reader.zig
+
+From what I can collect: there's four fields in this reader: 
+
+```zig
+vtable: *const VTable,
+buffer: []u8,
+/// Number of bytes which have been consumed from `buffer`.
+seek: usize,
+/// In `buffer` before this are buffered bytes, after this is `undefined`.
+end: usize,
+```
+
+Buffer, seek and end are self explanatory, but vtable is not. Vtable is a struct that holds function pointers implementing the reader interface. It has one thing that is what interests us: "stream". 
+
+```zig
+stream: *const fn (r: *Reader, w: *Writer, limit: Limit) StreamError!usize,
+```
+So it takes in a reader, a writer and a limit. 
+
+> /// Implementations are encouraged to utilize mandatory minimum buffer
+> /// sizes combined with short reads (returning a value less than `limit`)
+> /// in order to minimize complexity.
+> 
+Definitely, our process job must take place within stream.
+
+Line 260, ```pub fn streamRemaining(r: *Reader, w: *Writer) StreamRemainingError!usize ``` is used to set the stream. It just has an offset and and calls the stream until it's done.
+
+Now, how does the reader provision its buffer? File seeking can be done using readPositionalAll: https://www.ziglang.in/learn/files/random-access/, https://www.mtsoukalos.eu/2026/04/file-seeking-in-zig/.
+
+
 ### Multi-core
 
 Claude resume:
