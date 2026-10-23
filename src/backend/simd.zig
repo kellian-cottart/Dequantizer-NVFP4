@@ -1,9 +1,9 @@
 const std = @import("std");
 const math = std.math;
 
-const e2m1Cases = @import("cases.zig").e2m1Cases;
-const e4m3Cases = @import("cases.zig").e4m3Cases;
-const nvfp4Cases = @import("cases.zig").nvfp4Cases;
+const e2m1Cases = @import("scalar.zig").e2m1Cases;
+const e4m3Cases = @import("scalar.zig").e4m3Cases;
+const nvfp4Cases = @import("scalar.zig").nvfp4Cases;
 
 // SIMD, what happens in there?
 // https://www.openmymind.net/SIMD-With-Zig/
