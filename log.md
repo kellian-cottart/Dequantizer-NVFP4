@@ -129,6 +129,72 @@ They're usually stored in uint8, containing 4 bits of lower nibble and 4 bits of
   - `X.weight_scale_2`: `F32`, scalar
 - Compared with MXFP4: smaller blocks and a scale with real mantissa bits (E4M3 vs a pure power of two) give finer scaling, so lower error. The F32 tensor scale makes up for E4M3's limited range (max 448).
 
+## The maths behind the operations of bit shift
+
+Huge shoutout to @Théo Ballet ([www.linkedin.com/in/th%C3%A9o-b-6a1714130](https://www.linkedin.com/in/th%C3%A9o-b-6a1714130/)), my amazing hardware guy for walking me through the operations.
+
+There's this cool website about many format too ([sw23.github.io/fp-conv/formats/fp32.html](https://sw23.github.io/fp-conv/formats/fp32.html))!
+
+Each field is a number multiplied by the weight of its lowest bit:
+
+| format | layout                                   | as a sum              |
+| ------ | ---------------------------------------- | --------------------- |
+| E2M1   | `s ee m`                                 | s·2^3 + e·2^1 + m     |
+| E4M3   | `s eeee mmm`                             | s·2^7 + e·2^3 + m     |
+| f32    | `s` + 8 exponent bits + 23 mantissa bits | s·2^31 + E′·2^23 + M′ |
+
+They all have a bias, respectively 1, 7 and 127. To convert one into another, we have to set equalities behind the different concerned bits.
+
+- Sign: s' = s, so we have to move it to the top of the bit (<<31)
+- Exponent: 2 ^(E' - 127) = 2^(e-bias) so E' = e + (127 - bias)
+- Mantissa: M' / 2^23 = m/2^M so M' = m * 2^(23 - M)
+
+Hence, we just have to fill each format
+
+|      | sign shift                               | E′      | M′                     |
+| ---- | ---------------------------------------- | ------- | ---------------------- |
+| E2M1 | 3 → 31: `<< 28` (or `>> 3` then `<< 31`) | e + 126 | m · 2^22, so `m << 22` |
+| E4M3 | 7 → 31: `<< 24`                          | e + 120 | m · 2^20, so `m << 20` |
+
+Because exponents are above mantissa, we can also move both together as a group and combine operations.
+
+Most of the issue comes from subnormals that break the formula. For E2M1 it's simple because m can only take 2 values yielding 0 or 0.5: `m * (126 << 23)`
+
+But for E4M3, it's messier. [github.com/Maratyszcza/FP16/blob/master/include/fp16/fp16.h](https://github.com/Maratyszcza/FP16/blob/master/include/fp16/fp16.h) provides an implementation for float16. Here, it's 8 values. They propose to build and substract by
+
+1. Pretending e=1 and compute 2^-6 (1+ m/8)
+2. Subtract $2^{-6}$, yielding $2^{-6} \cdot \frac{m}{8}$ with no rounding error, by **Sterbenz's lemma**: if $\frac{y}{2} \le x \le 2y$, the float result of $x - y$ is exact.
+
+> Here $x = 2^{-6}\left(1 + \frac{m}{8}\right)$ and $y = 2^{-6}$, so $y \le x \le 1.875 \cdot y$ and the condition holds.
+
+### Timing tables
+
+I measured the timing between implementations by asking Claude to make a little benchmark comparator (i'm not too familiar with the comptime and pointers over functions for now, so i'm delegating because it's a faraminous amount of data at the same time to process. It was computed on Ryzen 7 5800X.
+
+#### E2M1
+
+| variant                           | ns/code |
+| --------------------------------- | ------- |
+| `e2m1ToF32SimdSlow` (`@exp2`)     | 2.13    |
+| `e2m1ToF32SimdLut` (`inline for`) | 0.34    |
+| `e2m1ToF32Simd` (bits)            | 0.16    |
+
+Exponential is always super slow to compute unfortunately.
+
+#### E3M4
+
+| variant                         | ns/code  |
+| ------------------------------- | -------- |
+| scalar `e4m3ToF32` (`math.pow`) | 16.1     |
+| LUT                             | 0.28     |
+| **`e4m3ToF32bits`**             | **0.13** |
+
+I didn't code the LUT, but i'll take the word of claude for it: i coded the simd lut for e2m1, it must be pretty similar.
+
+Open questions:
+
+- Once the compute is approximately at the same speed for both methods we still have our formula **value = E2M1 code × E4M3 block scale × f32 tensor scale.** As we are waiting for both these instructions to be computed to multiply them, the objective is to have the both of them as low as possible at the same time. But it would be good to check if the bottleneck is in the compute or in the ram before trying to make it faster. What is bottlenecking?
+
 ## Zig
 
 ### Versionning
@@ -142,7 +208,7 @@ I'll work on `0.17.0', which is the latest stable version at the time of writing
 ### Documentation
 
 - [https://ziglang.org/documentation/0.17.0/](https://ziglang.org/documentation/0.17.0/): The official Zig documentation for my version (`master` documents the dev version)
-- [https://ziglang.org/download/0.16.0/release-notes.html](https://ziglang.org/download/0.16.0/release-notes.html): The big `std.Io` rework (files, threads, sync primitives); most tutorials online predate it
+- [https://ziglang.org/download/0.16.0/release-notes.html](https://ziglang.org/download/0.16.0/release-notes.html): The big `std.Io` rework (files, threads, sync primitives)
 - [https://ziglang.org/download/0.17.0/release-notes.html](https://ziglang.org/download/0.17.0/release-notes.html): Changes since 0.16 (`@bitCast` on vectors, build system renames)
 - [gist.github.com/ityonemo/769532c2017ed9143f3571e5ac104e50](https://gist.github.com/ityonemo/769532c2017ed9143f3571e5ac104e50): a half hour to learn Zig, the basics of the language.
 - [mojoauth.com/dev-guides/serialize-and-deserialize-json-with-zig](https://mojoauth.com/dev-guides/serialize-and-deserialize-json-with-zig): deserialize json with zig
@@ -340,6 +406,23 @@ What I can do next is write the code for dispatch:
 - then SIMD
 - then Multicore
 - and then we're good?
+
+### 21/10/2026
+
+- Dedicated most of the time to figure out what the stream meant and to find a good stucture that felt good and made sense in my brain. I want to do a sort of map / reduce as in hadoop
+- In fact, i'm going to serve a streaming tensor model so I actually first need to build a layout of what to process and how to process it to stream it afterwards
+- So first, i do a pass on the structure, i gather jobs with distinct roles by tagging them. I rebuild a new header with the right sectors (this on hold for now). Then I stream depending on the job (either copy/dequantize)
+
+### 22/10/2026
+
+- Finished the job implementation, i don't know really how the streaming is going to be so I set some placeholder info i could get on the documentation and decided to focus on making sure i was labelling my jobs correctly. I got to the end of it, i think (until i figure out what i didn't do correctly for the stream)
+- Started reading a lot about the format and simd to get to a satisfying code. Asked theo about how bit shifting and dequantization worked
+- finished e2m1 (easy enough with the full explanation)
+
+### 23/10/2026
+
+- Finished E4M3 which was way more complicated than the other due to having more bits
+- Will lead on streaming.
 
 ## Open Questions
 
