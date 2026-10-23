@@ -107,8 +107,8 @@ NVFP4 combines three number formats: 4-bit values (E2M1), an 8-bit scale per blo
 
 They're usually stored in uint8, containing 4 bits of lower nibble and 4 bits of upper nibble. If a byte has the hexadecimal value 0x71 (binary 0111 0001):
 
-- Lower nibble (0x1 / 0001): Represents the first E2M1 element (value: 0.5).
-- Upper nibble (0x7 / 0111): Represents the second E2M1 element (value: 6.0). (subnormal)
+- Lower nibble (0x1 / 0001): Represents the first E2M1 element (value: 0.5).(subnormal)
+- Upper nibble (0x7 / 0111): Represents the second E2M1 element (value: 6.0). (normal)
 
 #### FP8 E4M3 (the block scales)
 
@@ -181,7 +181,7 @@ I measured the timing between implementations by asking Claude to make a little 
 
 Exponential is always super slow to compute unfortunately.
 
-#### E3M4
+#### E4M3
 
 | variant                         | ns/code  |
 | ------------------------------- | -------- |
@@ -426,10 +426,7 @@ What I can do next is write the code for dispatch:
 
 ## Open Questions
 
-- To what format should I dequantize the values? `f32` is the most common format, but it is not the most efficient one. I could use `f16` or `bfloat16`, but they are not supported by all CPUs/GPUs.
-  I'll start with `f32` and see how it goes, and defend it if I need to.
-- To what output format should I dequantize the stream? Raw tensor bytes could meet the requirements, and fit into pipelining in another program. But I need to verify that this is the case. Or another `safetensors` file?
-- What to do with non-NVFP4 tensors if any?
+- Is multicore really worth it? Is the compute the bottleneck or the memory? Not really sure of doing it for the project, it's a long time investment for maybe a very small reward.
 
 ## What I'm not going to do
 
