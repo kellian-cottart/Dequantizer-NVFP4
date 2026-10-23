@@ -166,8 +166,9 @@ test "time the e2m1 implementations" {
 // 2^(E′−127) = 2^(e−7) gives E′ = e + 120
 // M′/2^23 = m/8 gives M′ = m·2^20
 
-// We could do the lut again
+// We could do the lut again as in
 // pierrelgol/nvfp4-dequantizer
+// but i really want to find out the bit shifting and bit masking way
 
 // Paper from vLLM: "Who Says Elephants Can't Run" (Kim et al., 2022, arXiv:2211.10017).
 // They entirely discard the nans to make the code run faster
@@ -203,6 +204,9 @@ pub fn e4m3ToF32bits(bits: @Vector(16, u8)) @Vector(16, f32) {
     const built: F = @bitCast(expMant + @as(V, @splat(121 << 23)));
     // Substracting this "fake number" gives the right result (sterbenz lemma)
     // https://en.wikipedia.org/wiki/Sterbenz_lemma
+    // tldr x - y is only equal if y/2 <= x <= 2y, which is the case here,
+    // as we are in the subnormal range
+    // That's a neat trick
     const subnormal: V = @bitCast(built - smallestNormal);
 
     // Check if we're normal or subnormal
@@ -217,18 +221,6 @@ pub fn e4m3ToF32bits(bits: @Vector(16, u8)) @Vector(16, f32) {
 
     // The sign is the top bit of the float: 0 with the sign set is -0.0
     return @bitCast(magnitude | sign);
-}
-
-pub fn e4m3ToF32(bits: u8) !f32 {
-    // ​S.1111.111 => NaN
-    // Mask the sign off so both 0x7F and 0xFF count
-    if ((bits & 0x7F) == 0x7F) return math.nan(f32);
-    const sign = (bits >> 7) & 1;
-    const exponent = (bits >> 3) & 0b1111;
-    const mantissa = bits & 0b111;
-    const floatMantissa: f32 = @floatFromInt(mantissa);
-    const floatMagnitude: f32 = if (exponent != 0) (1.0 + floatMantissa / 8.0) * math.pow(f32, 2.0, @as(f32, @floatFromInt(exponent)) - 7.0) else (1.0 * floatMantissa / 8.0) * math.pow(f32, 2.0, -6.0);
-    return if (sign == 1) -floatMagnitude else floatMagnitude;
 }
 
 test "E4M3 decodes the scalar cases as one block" {
