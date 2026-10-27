@@ -195,6 +195,15 @@ Open questions:
 
 - Once the compute is approximately at the same speed for both methods we still have our formula **value = E2M1 code × E4M3 block scale × f32 tensor scale.** As we are waiting for both these instructions to be computed to multiply them, the objective is to have the both of them as low as possible at the same time. But it would be good to check if the bottleneck is in the compute or in the ram before trying to make it faster. What is bottlenecking?
 
+When coding the full pipeline for dequantizing, I realized that `@Vector(16, u8)` for the E4M3 is maybe not the smartest because while NVFP4 blocks are decoded 16 by 16, only one E4M3 is needed for this. So the best I could do is actually to pick the width at `comptime` depending on the size of my buffer.
+
+My current idea of a scheme would be:
+
+- Split blocks into K ranges of 16 blocks
+- Each worker takes a range of 16 blocks ($8\times16$ for the weights, 16 scales 1, 1 scale 2, and outs $64\times16$
+- Wait for all worker
+- Go to the next minijob
+
 ## Zig
 
 ### Versionning
@@ -315,11 +324,11 @@ Phases:
          2. Read the weights
          3. Dequantize them into f32 and handle them out
 
-Turns out that one of the worst things in a programmmer's life is to find out the lack of documentation on a library due to a release just being done.  
+Turns out that one of the worst things in a programmmer's life is to find out the lack of documentation on a library due to a release just being done.
 
 The full documentation of the `std.Io.Reader` interface is here: https://github.com/ziglang/zig/blob/master/lib/std/Io/Reader.zig
 
-From what I can collect: there's four fields in this reader: 
+From what I can collect: there's four fields in this reader:
 
 ```zig
 vtable: *const VTable,
@@ -330,23 +339,23 @@ seek: usize,
 end: usize,
 ```
 
-Buffer, seek and end are self explanatory, but vtable is not. Vtable is a struct that holds function pointers implementing the reader interface. It has one thing that is what interests us: "stream". 
+Buffer, seek and end are self explanatory, but vtable is not. Vtable is a struct that holds function pointers implementing the reader interface. It has one thing that is what interests us: "stream".
 
 ```zig
 stream: *const fn (r: *Reader, w: *Writer, limit: Limit) StreamError!usize,
 ```
-So it takes in a reader, a writer and a limit. 
+
+So it takes in a reader, a writer and a limit.
 
 > /// Implementations are encouraged to utilize mandatory minimum buffer
 > /// sizes combined with short reads (returning a value less than `limit`)
 > /// in order to minimize complexity.
-> 
+
 Definitely, our process job must take place within stream.
 
-Line 260, ```pub fn streamRemaining(r: *Reader, w: *Writer) StreamRemainingError!usize ``` is used to set the stream. It just has an offset and and calls the stream until it's done.
+Line 260, ``pub fn streamRemaining(r: *Reader, w: *Writer) StreamRemainingError!usize `` is used to set the stream. It just has an offset and and calls the stream until it's done.
 
 Now, how does the reader provision its buffer? File seeking can be done using readPositionalAll: https://www.ziglang.in/learn/files/random-access/, https://www.mtsoukalos.eu/2026/04/file-seeking-in-zig/.
-
 
 ### Multi-core
 
@@ -456,6 +465,11 @@ What I can do next is write the code for dispatch:
 
 - Finished E4M3 which was way more complicated than the other due to having more bits
 - Will lead on streaming.
+
+### 27/10/2026
+
+- Made progress towards dequantize (need to compute the )
+- Made progress towards multicore (i have a clear idea of what to do)
 
 ## Open Questions
 
