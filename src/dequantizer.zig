@@ -19,15 +19,21 @@ pub const Dequantizer = struct {
     // stucture to know which blocks to read
     // jobs is an array of jobs to perform, jobIndex is the current job, chunkSize is the size of the mini-job
     // err is an optional error that can be set if a read fails
+    // we add scale2 in case of a dequantize job
+    // this conserves the information accross mini-jobs
+    // 1.0 is neutral in the multiplication if its not set
+    // pos serves to indicate the starting point of the mini-job
 
     interface: Io.Reader,
     allocator: std.mem.Allocator,
     io: Io,
     file: Io.File,
     structure: read.Structure,
+    scale2: f32 = 1.0,
     jobs: []Job,
     jobIndex: usize = 0,
     chunkSize: usize,
+    pos: u64 = 0,
     err: ?Io.File.ReadPositionalError = null,
 
     // Read the structure, make the jobs, build the header
@@ -132,13 +138,28 @@ pub const Dequantizer = struct {
                 }
             },
             .dequantize => |nvfp4Info| {
-
-                // We hold the position of the mini-job in
-                const scale2Len = nvfp4Info.scale2.data_offsets[1] - nvfp4Info.scale2.data_offsets[0];
-
+                // reminded: nvfp4info has three field: scale, scale2 and weight that are TensorInfo structs
+                // cf: dispatch/jobs
                 // here we have a dequantize job, hence we need to read scales and weights
-                const copyLen = nvfp4Info.weight.data_offsets[1] - nvfp4Info.weight.data_offsets[0];
+                // first, we retrieve the scale 2 at the beginning of the job
+                if (self.pos == 0) {
+                    // f32 = 4 x u8
+                    var scale2Bytes: [4]u8 = undefined;
+                    const scale2Start = self.structure.dataStart + nvfp4Info.scale2.data_offsets[0];
+                    // we read to that position in the bytes array
+                    self.file.readPositionalAll(self.io, &scale2Bytes, scale2Start) catch |err| {
+                        self.err = err;
+                        return error.ReadFailed;
+                    };
+                    self.scale2 = @bitCast(std.mem.readInt(u32, &scale2Bytes, .little));
+                }
+
+                // for the bytes of the scale they're
+
                 const buffer = r.buffer[r.end..];
+
+                const copyLen = nvfp4Info.weight.data_offsets[1] - nvfp4Info.weight.data_offsets[0];
+
                 const miniJobSize: usize = @intCast(@min(self.chunkSize, copyLen - self.pos, buffer.len));
                 const startingPoint = self.structure.dataStart + nvfp4Info.weight.data_offsets[0] + self.pos;
 
@@ -251,12 +272,21 @@ test "dequantize stream" {
         // tiny.weight_scale_2 [4, 8]: F32
         193, 9,   28,  56,
         // tiny.norm.weight [8, 24]: 8 x BF16
-        128, 191, 55,  191, 219, 190, 18,  190, 18,  62,  219, 62,  55,  63,  128, 63,
+        128, 191, 55,  191,
+        219, 190, 18,  190,
+        18,  62,  219, 62,
+        55,  63,  128, 63,
         // tiny.weight_scale [24, 28]: 2 x 2 E4M3
         56,  63,  1,   126,
         // tiny.weight [28, 60]: 2 x 16 U8 (2 FP4 nibbles each)
-        16,  50,  84,  118, 152, 186, 220, 254, 239, 205, 171, 137, 103, 69,  35,  1,
-        16,  50,  84,  118, 152, 186, 220, 254, 247, 247, 247, 247, 247, 247, 247, 247,
+        16,  50,  84,  118,
+        152, 186, 220, 254,
+        239, 205, 171, 137,
+        103, 69,  35,  1,
+        16,  50,  84,  118,
+        152, 186, 220, 254,
+        247, 247, 247, 247,
+        247, 247, 247, 247,
     };
 
     // Create a temp dir to hold the fake file
