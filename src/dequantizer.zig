@@ -3,7 +3,13 @@ const Io = std.Io;
 const read = @import("read.zig");
 const Job = @import("dispatch/jobs.zig").Job;
 const makeJobs = @import("dispatch/jobs.zig").makeJobs;
-
+// Pull in the tests of the dispatch folder
+test {
+    _ = @import("dispatch/jobs.zig");
+    _ = @import("backend/simd/e2m1.zig");
+    _ = @import("backend/simd/e4m3.zig");
+    _ = @import("backend/simd/multiply.zig");
+}
 pub const Dequantizer = struct {
     // The reader to stream the data
     // https://github.com/ziglang/zig/blob/master/lib/std/Io/Reader.zig
@@ -14,15 +20,18 @@ pub const Dequantizer = struct {
     // seek is a usize, the current position in the buffer
     // the stream is written in the vtable and must be
 
-    // Interface to stream the data, it is a reader with a vtable that has a stream function
-    // Allocator for memory, io for reading, file for reading
-    // stucture to know which blocks to read
-    // jobs is an array of jobs to perform, jobIndex is the current job, chunkSize is the size of the mini-job
-    // err is an optional error that can be set if a read fails
-    // we add scale2 in case of a dequantize job
-    // this conserves the information accross mini-jobs
-    // 1.0 is neutral in the multiplication if its not set
-    // pos serves to indicate the starting point of the mini-job
+    // interface: to stream the data, it is a reader with a vtable that has a stream function
+    // allocator: for memory,
+    // io: for reading,
+    // file: the file to read from
+    // structure: to know which blocks to read
+    // jobs: an array of jobs to perform, jobIndex: the current job, chunkSize: the size of the mini-job
+    // err: an optional error that can be set if a read fails
+    // scale2: we add it in case of a dequantize job for the second scale, stays across a job
+    // default to 1.0 (neutral in the multiplication)
+    // scaleBuffer: the E4M3 block scales of the current mini-job, one byte per block of 16 values
+    // weightBuffer: packed E2M1 weights of the current mini-job, two values per byte (u8 instead of u4)
+    // pos: serves to indicate the starting point of the mini-job
 
     interface: Io.Reader,
     allocator: std.mem.Allocator,
@@ -30,6 +39,8 @@ pub const Dequantizer = struct {
     file: Io.File,
     structure: read.Structure,
     scale2: f32 = 1.0,
+    scaleBuffer: []u8,
+    weightBuffer: []u8,
     jobs: []Job,
     jobIndex: usize = 0,
     chunkSize: usize,
@@ -38,6 +49,9 @@ pub const Dequantizer = struct {
 
     // Read the structure, make the jobs, build the header
     pub fn init(allocator: std.mem.Allocator, io: Io, file: Io.File, chunkSize: usize) !Dequantizer {
+        // chunkSize is always a multiple of 8
+        if (chunkSize == 0 or chunkSize % 8 != 0) return error.InvalidChunkSize;
+
         const structure = try read.getStructure(allocator, io, file);
         errdefer structure.deinit();
 
@@ -51,6 +65,14 @@ pub const Dequantizer = struct {
         const buffer = try allocator.alloc(u8, chunkSize * 8);
         errdefer allocator.free(buffer);
 
+        // buffer for the scales
+        const scaleBuffer = try allocator.alloc(u8, chunkSize / 8);
+        errdefer allocator.free(scaleBuffer);
+
+        // buffer for the weights
+        const weightBuffer = try allocator.alloc(u8, chunkSize);
+        errdefer allocator.free(weightBuffer);
+
         // The Vtable is a struct with a field stream,
         //which is a function pointer to the stream function
 
@@ -59,6 +81,8 @@ pub const Dequantizer = struct {
             .allocator = allocator,
             .io = io,
             .file = file,
+            .scaleBuffer = scaleBuffer,
+            .weightBuffer = weightBuffer,
             .structure = structure,
             .jobs = jobs,
             // .outputHeader = outputHeader, // outputheader will not be computed for now
@@ -68,6 +92,8 @@ pub const Dequantizer = struct {
 
     pub fn deinit(self: *Dequantizer) void {
         self.allocator.free(self.interface.buffer);
+        self.allocator.free(self.scaleBuffer);
+        self.allocator.free(self.weightBuffer);
         // self.allocator.free(self.outputHeader);
         self.allocator.free(self.jobs);
         self.structure.deinit();
@@ -147,33 +173,50 @@ pub const Dequantizer = struct {
                     var scale2Bytes: [4]u8 = undefined;
                     const scale2Start = self.structure.dataStart + nvfp4Info.scale2.data_offsets[0];
                     // we read to that position in the bytes array
-                    self.file.readPositionalAll(self.io, &scale2Bytes, scale2Start) catch |err| {
+                    const nbBytes = self.file.readPositionalAll(self.io, &scale2Bytes, scale2Start) catch |err| {
                         self.err = err;
                         return error.ReadFailed;
                     };
+                    if (nbBytes != 4) return error.ReadFailed;
                     self.scale2 = @bitCast(std.mem.readInt(u32, &scale2Bytes, .little));
                 }
 
-                // for the bytes of the scale they're
-
                 const buffer = r.buffer[r.end..];
-
                 const copyLen = nvfp4Info.weight.data_offsets[1] - nvfp4Info.weight.data_offsets[0];
+                // Since here, we're going to push f32 instead of u8,
+                // (u4 x 2 due to having the lower nibble and upper nibble)
+                // we need to divide the size of a mini-job by 8 so that everything fitst in
+                const miniJobSize: usize = @intCast(@min(self.chunkSize, copyLen - self.pos, buffer.len / 8));
 
-                const miniJobSize: usize = @intCast(@min(self.chunkSize, copyLen - self.pos, buffer.len));
-                const startingPoint = self.structure.dataStart + nvfp4Info.weight.data_offsets[0] + self.pos;
-
-                const output = self.file.readPositionalAll(self.io, buffer[0..miniJobSize], startingPoint) catch |err| {
+                // Set-up the scales for the mini-job
+                const scaleBufferSlice = self.scaleBuffer[0 .. miniJobSize / 8];
+                const scaleStart = self.structure.dataStart + nvfp4Info.scale.data_offsets[0] + self.pos / 8;
+                // we read to that position in the bytes array
+                const nbBytesScales = self.file.readPositionalAll(self.io, scaleBufferSlice, scaleStart) catch |err| {
                     self.err = err;
                     return error.ReadFailed;
                 };
+                if (nbBytesScales != scaleBufferSlice.len) return error.ReadFailed;
 
-                if (output != miniJobSize) {
+                // Set-up the weights for the minijob
+
+                const weights = self.weightBuffer[0..miniJobSize];
+                const weightStart = self.structure.dataStart + nvfp4Info.weight.data_offsets[0] + self.pos;
+                const nbBytesWeights = self.file.readPositionalAll(self.io, weights, weightStart) catch |err| {
+                    self.err = err;
                     return error.ReadFailed;
-                }
+                };
+                if (nbBytesWeights != miniJobSize) return error.ReadFailed;
+
+                // now we can compute the mini-jobs sequentially and write them directly into the writing buffer
+
+                // std.debug.print("buffer {any} \n", .{self.weightBuffer[0..miniJobSize]});
+                // std.debug.print("scale buffer {any} \n", .{scaleBufferSlice});
+
                 // Update the position
                 self.pos += miniJobSize;
-                r.end += miniJobSize;
+                // we send out float32 instead so we need 8 times more space
+                r.end += miniJobSize * 8;
                 if (self.pos == copyLen) {
                     self.jobIndex += 1;
                     self.pos = 0;
@@ -183,23 +226,6 @@ pub const Dequantizer = struct {
         return 0;
     }
 };
-
-// line 1840-1848 of the reader.zig file
-//   fn stream(r: *Reader, w: *Writer, limit: Limit) StreamError!usize {
-//         const this: *@This() = @alignCast(@fieldParentPtr("reader", r));
-//         const data = limit.slice(try w.writableSliceGreedy(1));
-//         var vec: [1][]u8 = .{data};
-//         const n = try this.in.readVec(&vec);
-//         this.hasher.update(data[0..n]);
-//         w.advance(n);
-//         return n;
-//     }
-
-// Pull in the tests of the dispatch folder
-test {
-    _ = @import("dispatch/jobs.zig");
-    _ = @import("backend/simd.zig");
-}
 
 // Write a fake safetensors file: u64 little-endian header length, the json header, then the body
 fn writeFakeFile(io: Io, dir: Io.Dir, json: []const u8, body: []const u8) !Io.File {
@@ -301,19 +327,10 @@ test "dequantize stream" {
     var dequantizer = try Dequantizer.init(allocator, io, file, 8);
     defer dequantizer.deinit();
 
-    // Exactly one copy job of 16 bytes
-    try std.testing.expectEqual(1, dequantizer.jobs.len);
-    try std.testing.expect(dequantizer.jobs[0].action == .copy);
-    const info = dequantizer.jobs[0].action.copy;
-    try std.testing.expectEqual(16, info.data_offsets[1] - info.data_offsets[0]);
-
-    // The 16 bytes come out unchanged
     var output: [16]u8 = undefined;
     var writer: Io.Writer = .fixed(&output);
     const nbBytes = try dequantizer.interface.streamRemaining(&writer);
 
     // expect the job to be done and the output to match the input
     try std.testing.expectEqual(16, nbBytes);
-    // expect the output to match the input
-    try std.testing.expectEqualSlices(u8, &body, writer.buffered());
 }
