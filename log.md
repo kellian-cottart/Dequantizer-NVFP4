@@ -204,6 +204,14 @@ My current idea of a scheme would be:
 - Wait for all worker
 - Go to the next minijob
 
+#### The nibble conundrum
+
+Take a full u8 array of weights gathered from your buffer. each u8 entry is a u4, with low and high nibble back to back. When splitting, we retrieve a vector on only the low nibbles and only the high. Then we must make an entire vector that has first a low nibble then a high nibble so on and so forth.
+
+This is where the simd function @shuffle comes from, allowing us to actually permute the entries of a vector according to a mask.
+
+[ziglang.org/documentation/0.17.0/#shuffle](https://ziglang.org/documentation/0.17.0/#shuffle)
+
 ## Zig
 
 ### Versionning
@@ -412,6 +420,10 @@ for (0..iters) |_| {
 const ns = start.untilNow(io, .awake).nanoseconds;
 ```
 
+### `@bitCast`
+
+Yes, you deserve a whole section you slowpoke. Going straight from a vector of f32 to an array of bytes actually uses a for loop. Keeping the same element type is actually the fastest way to make it work well.
+
 ## Journal
 
 ### 18/10/2026
@@ -468,8 +480,14 @@ What I can do next is write the code for dispatch:
 
 ### 27/10/2026
 
-- Made progress towards dequantize (need to compute the )
+- Made progress towards dequantize (need to compute the multiplication between scales and serve the results )
 - Made progress towards multicore (i have a clear idea of what to do)
+
+### 29/10/2026
+
+- Figured out the low nibble and high nibble: Learned @shuffle to permute
+- Learned about group, about atomic adds like in c++ about sending plates to the worker like I'm playing overcooked
+
 
 ## Open Questions
 
