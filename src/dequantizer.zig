@@ -3,6 +3,8 @@ const Io = std.Io;
 const read = @import("read.zig");
 const Job = @import("dispatch/jobs.zig").Job;
 const makeJobs = @import("dispatch/jobs.zig").makeJobs;
+const simd = @import("backend/simd/multiply.zig");
+
 // Pull in the tests of the dispatch folder
 test {
     _ = @import("dispatch/jobs.zig");
@@ -32,6 +34,7 @@ pub const Dequantizer = struct {
     // scaleBuffer: the E4M3 block scales of the current mini-job, one byte per block of 16 values
     // weightBuffer: packed E2M1 weights of the current mini-job, two values per byte (u8 instead of u4)
     // pos: serves to indicate the starting point of the mini-job
+    // numWorkers: how many workers decode a mini-job in parallel, at most the cpu count
 
     interface: Io.Reader,
     allocator: std.mem.Allocator,
@@ -44,13 +47,17 @@ pub const Dequantizer = struct {
     jobs: []Job,
     jobIndex: usize = 0,
     chunkSize: usize,
+    numWorkers: usize,
     pos: u64 = 0,
     err: ?Io.File.ReadPositionalError = null,
 
     // Read the structure, make the jobs, build the header
-    pub fn init(allocator: std.mem.Allocator, io: Io, file: Io.File, chunkSize: usize) !Dequantizer {
+    pub fn init(allocator: std.mem.Allocator, io: Io, file: Io.File, chunkSize: usize, numWorkers: usize) !Dequantizer {
         // chunkSize is always a multiple of 8
         if (chunkSize == 0 or chunkSize % 8 != 0) return error.InvalidChunkSize;
+        // at least one worker, and never more than the cpus (hardware threads), 1 if the count fails
+        if (numWorkers == 0) return error.InvalidNumWorkers;
+        const cpuCount = std.Thread.getCpuCount() catch 1;
 
         const structure = try read.getStructure(allocator, io, file);
         errdefer structure.deinit();
@@ -87,6 +94,7 @@ pub const Dequantizer = struct {
             .jobs = jobs,
             // .outputHeader = outputHeader, // outputheader will not be computed for now
             .chunkSize = chunkSize,
+            .numWorkers = @min(numWorkers, cpuCount),
         };
     }
 
@@ -210,6 +218,8 @@ pub const Dequantizer = struct {
 
                 // now we can compute the mini-jobs sequentially and write them directly into the writing buffer
 
+                //simd.fromBufferToWorker();
+
                 // std.debug.print("buffer {any} \n", .{self.weightBuffer[0..miniJobSize]});
                 // std.debug.print("scale buffer {any} \n", .{scaleBufferSlice});
 
@@ -256,7 +266,7 @@ test "copy stream" {
     defer file.close(io);
 
     // chunkSize 8: the 16-byte job takes 2 mini-jobs, so pos and the job rollover get exercised
-    var dequantizer = try Dequantizer.init(allocator, io, file, 8);
+    var dequantizer = try Dequantizer.init(allocator, io, file, 8, 1);
     defer dequantizer.deinit();
 
     // Exactly one copy job of 16 bytes
@@ -325,7 +335,7 @@ test "dequantize stream" {
     defer file.close(io);
 
     // chunkSize 8: the 16-byte job takes 2 mini-jobs, so pos and the job rollover get exercised
-    var dequantizer = try Dequantizer.init(allocator, io, file, 8);
+    var dequantizer = try Dequantizer.init(allocator, io, file, 8, 1);
     defer dequantizer.deinit();
 
     var output: [16]u8 = undefined;
