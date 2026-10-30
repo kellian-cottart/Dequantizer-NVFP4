@@ -53,78 +53,102 @@ test "interleave vector" {
     }
 }
 
-// // https://www.openmymind.net/Zigs-memcpy-copyForwards-and-copyBackwards/
-// // https://hive.blog/hive-196387/@scipio/learn-zig-series-19-simd-with-vector
-// fn decodePlate(weights: []const u8, scales: []const u8, scale2: f32, out: []u8) void {
+// https://www.openmymind.net/Zigs-memcpy-copyForwards-and-copyBackwards/
+// https://hive.blog/hive-196387/@scipio/learn-zig-series-19-simd-with-vector
+fn decodePlate(weights: []const u8, scales: []const u8, scale2: f32, out: []u8) void {
+    // pad a short plate with zeros so the decode always sees 16 scales to fit (the size of block)
+    var padded: [16]u8 = @splat(0);
+    @memcpy(padded[0..scales.len], scales);
+    const scale2s: @Vector(16, f32) = @splat(scale2);
+    const factors = e4m3ToF32bits(16, padded) * scale2s;
+    // a vector can't be indexed with a runtime k of course so i need a new vector for that
+    const factorArray: [16]f32 = factors;
 
-//     // pad a short plate with zeros so the decode always sees 16 scales to fit (the size of block)
-//     var padded: [16]u8 = @splat(0);
-//     @memcpy(padded[0..scales.len], scales);
-//     const scale2s: @Vector(16, f32) = @splat(scale2);
-//     const factors = e4m3ToF32bits(16, padded) * scale2s;
+    const blocks: []const [8]u8 = std.mem.bytesAsSlice([8]u8, weights);
+    for (blocks, 0..) |block, k| {
+        const bytes: @Vector(8, u8) = block;
+        // first values in the low nibble, second values in the high nibble
+        const low = bytes & @as(@Vector(8, u8), @splat(0x0F));
+        const high = bytes >> @splat(4);
 
-//     const blocks: []const [8]u8 = std.mem.bytesAsSlice([8]u8, weights);
-//     for (blocks, 0..) |block, k| {
-//         const bytes: @Vector(8, u8) = block;
-//         // first values in the low nibble, second values in the high nibble
-//         const low = bytes & @as(@Vector(8, u8), @splat(0x0F));
-//         const high = bytes >> @splat(4);
+        // back in file order: low 0 high 0 low 1 high 1
+        const codes: @Vector(16, u8) = @shuffle(u8, low, high, interleaveMask());
+        const e2m1 = e2m1ToF32Simd(@truncate(codes));
+        const factor: @Vector(16, f32) = @splat(factorArray[k]);
+        const nvfp4: @Vector(64, u8) = @bitCast(factor * e2m1);
+        // notation is: slice from position k*64 to out. Out of this, we have the remaining out buffer available which was preselected, so we slice just for the 64 bits that we're going to write, but it would be only a pointer there
+        // we dereference the pointer to assign value
+        out[k * 64 ..][0..64].* = nvfp4;
+    }
+}
 
-//         // back in file order: low 0 high 0 low 1 high 1
-//         const codes: @Vector(16, u8) = @shuffle(u8, low, high, interleaveMask);
-//     }
-// }
+fn worker(plates: *Plates) void {
+    while (true) {
+        // Increase the counter of blocks taken
+        const k = plates.next.fetchAdd(1, .monotonic);
+        // If we have finished distributing all the plates then we are done
+        if (k >= plates.numPlates) return;
 
-// fn worker(plates: *Plates) void {
-//     while (true) {
-//         // Increase the counter of blocks taken
-//         const k = plates.next.fetchAdd(1, .monotonic);
-//         // If we have finished distributing all the plates then we are done
-//         if (k >= plates.numPlates) return;
+        // the plate is computed from its ticket: blocks a..b
+        const start = k * plates.blocksPerPlate;
+        // the end is the minimum between the number of blocks remaining to compute and the max theoritical
+        const end = @min(start + plates.blocksPerPlate, plates.numBlocks);
 
-//         // the plate is computed from its ticket: blocks a..b
-//         const start = k * plates.blocksPerPlate;
-//         // the end is the minimum between the number of blocks remaining to compute and the max theoritical
-//         const end = @min(start + plates.blocksPerPlate, plates.numBlocks);
+        // 8 bytes of weights, 1 scale, 64 bytes of output per block that we decode in the meantime
+        decodePlate(plates.weights[8 * start .. 8 * end], plates.scales[start..end], plates.scale2, plates.out[64 * start .. 64 * end]);
+    }
+}
 
-//         // 8 bytes of weights, 1 scale, 64 bytes of output per block that we decode in the meantime
-//         decodePlate(plates.weights[8 * start .. 8 * end], plates.scales[start..end], plates.scale2, plates.out[64 * start .. 64 * end]);
-//     }
-// }
+test "buffers to workers" {
+    var group: Io.Group = .init;
+    const io = std.testing.io;
 
-// test "buffers to workers" {
-//     var group: Io.Group = .init;
-//     const io = std.testing.io;
+    const cpus = 12;
+    const blockPerGroups = 16;
+    // init a number of blocks (192 = 16x12)
+    const blocks = 200;
+    // 0x21: first nibble 0x1 = 0.5, second nibble 0x2 = 1.0
+    const weights: [blocks * 8]u8 = @splat(0x21);
+    // 0x40: E4M3 with e = 8, m = 0, so 2^(8-7) = 2.0
+    const scales: [blocks]u8 = @splat(0x40);
+    const scale2: f32 = 0.25;
 
-//     const cpus = 12;
-//     const blockPerGroups = 16;
-//     // init a number of blocks (192 = 16x12)
-//     const blocks = 200;
-//     // 0x21: first nibble 0x1 = 0.5, second nibble 0x2 = 1.0
-//     const weights: [blocks * 8]u8 = @splat(0x21);
-//     // 0x40: E4M3 with e = 8, m = 0, so 2^(8-7) = 2.0
-//     const scales: [blocks]u8 = @splat(0x40);
-//     const scale2: f32 = 0.25;
+    // get the values out as float32
+    var out: [blocks * 64]u8 = undefined;
 
-//     // get the values out as float32
-//     const out: [blocks * 64]u8 = undefined;
+    // my group of worker is already balanced, so we can split them evenly
+    // let's think of what we are doing as positioning plates on a counter
+    // every worker gets a plate and must prepare the food and give it to the next level
 
-//     // my group of worker is already balanced, so we can split them evenly
-//     // let's think of what we are doing as positioning plates on a counter
-//     // every worker gets a plate and must prepare the food and give it to the next level
+    var plates: Plates = .{
+        .weights = &weights, // don't forget to reference the data
+        .scales = &scales,
+        .scale2 = scale2,
+        .out = &out, // it was const, so i need to make it modifiable
+        .blocksPerPlate = 16,
+        .numPlates = (weights.len / 8 + 15) / blockPerGroups,
+        .numBlocks = weights.len / 8,
+    };
 
-//     var plates: Plates = .{
-//         .weights = weights,
-//         .scales = scales,
-//         .scale2 = scale2,
-//         .out = out,
-//         .blocksPerPlate = 16,
-//         .numPlates = (weights.len / 8 + 15) / blockPerGroups,
-//         .numBlocks = weights.len / 8,
-//     };
+    for (0..cpus) |_| group.async(io, worker, .{&plates});
+    try group.await(io);
 
-//     for (0..cpus) |_| group.async(io, worker, .{&plates});
-//     try group.await(io);
-// }
-
-// // pub fn decodeNVFP4()
+    // ok now the test passes, but we need to look at the decoding
+    // factor is 2*0.25 = 0.5 for the first bit, and 0.5*0.5 = 0.25 for the second
+    // given the weights 0.5 and second 1.0 it should give
+    // 0.25 yielding bytes 0, 0, 128, 62
+    // 0.5 yielding bytes 0, 0, 0, 63
+    // len should be 200x64
+    try std.testing.expectEqual(out.len, 200 * 64);
+    const high: [4]u8 = .{ 0, 0, 128, 64 };
+    const low: [4]u8 = .{ 0, 0, 0, 63 };
+    var k: usize = 0;
+    while (k < out.len) : (k += 4) {
+        const float: [4]u8 = out[k .. k + 4];
+        if (k % 8 == 0) {
+            try std.testing.expectEqual(high, float);
+        } else {
+            try std.testing.expectEqual(low, float);
+        }
+    }
+}
