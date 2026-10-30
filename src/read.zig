@@ -40,7 +40,6 @@ pub fn readHeaderJson(allocator: std.mem.Allocator, fileReader: *Io.File.Reader)
         error.ReadFailed => return fileReader.err.?,
         error.EndOfStream => return error.InvalidSafetensors, // file shorter than 8 bytes
     };
-    std.debug.print("JSON header length: {}\n", .{jsonLen});
 
     // Next jsonLen bytes: the JSON header itself.
     const json = r.readAllocAll(allocator, @intCast(jsonLen)) catch |err| switch (err) {
@@ -48,7 +47,6 @@ pub fn readHeaderJson(allocator: std.mem.Allocator, fileReader: *Io.File.Reader)
         error.OutOfMemory => return error.OutOfMemory,
         error.EndOfStream => return error.InvalidSafetensors, // header truncated
     };
-    std.debug.print("JSON header: {s}\n", .{json});
 
     return json;
 }
