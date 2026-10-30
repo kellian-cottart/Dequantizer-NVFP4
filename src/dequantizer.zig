@@ -3,11 +3,13 @@ const Io = std.Io;
 const read = @import("read.zig");
 const Job = @import("dispatch/jobs.zig").Job;
 const makeJobs = @import("dispatch/jobs.zig").makeJobs;
+const buildHeader = @import("dispatch/header.zig").buildHeader;
 const simd = @import("backend/simd/multiply.zig");
 
 // Pull in the tests of the dispatch folder
 test {
     _ = @import("dispatch/jobs.zig");
+    _ = @import("dispatch/header.zig");
     _ = @import("backend/simd/e2m1.zig");
     _ = @import("backend/simd/e4m3.zig");
     _ = @import("backend/simd/multiply.zig");
@@ -35,6 +37,10 @@ pub const Dequantizer = struct {
     // weightBuffer: packed E2M1 weights of the current mini-job, two values per byte (u8 instead of u4)
     // pos: serves to indicate the starting point of the mini-job
     // numWorkers: how many workers decode a mini-job in parallel, at most the cpu count
+    // blocksPerPlate: how many blocks a worker takes per serving (256 measured best, check claude benchmark)
+    // minBlocksForWorkers: below this many blocks in a mini-job, decode on the calling thread (8192 measured)
+    // outputHeader: the header of the output file (8 bytes of length + json), streamed before the first job
+    // headerPos: how much of the header was already streamed
 
     interface: Io.Reader,
     allocator: std.mem.Allocator,
@@ -48,15 +54,21 @@ pub const Dequantizer = struct {
     jobIndex: usize = 0,
     chunkSize: usize,
     numWorkers: usize,
+    blocksPerPlate: usize,
+    minBlocksForWorkers: usize,
+    outputHeader: []u8,
+    headerPos: usize = 0,
     pos: u64 = 0,
     err: ?Io.File.ReadPositionalError = null,
 
     // Read the structure, make the jobs, build the header
-    pub fn init(allocator: std.mem.Allocator, io: Io, file: Io.File, chunkSize: usize, numWorkers: usize) !Dequantizer {
+    pub fn init(allocator: std.mem.Allocator, io: Io, file: Io.File, chunkSize: usize, numWorkers: usize, blocksPerPlate: usize, minBlocksForWorkers: usize) !Dequantizer {
         // chunkSize is always a multiple of 8
         if (chunkSize == 0 or chunkSize % 8 != 0) return error.InvalidChunkSize;
         // at least one worker, and never more than the cpus (hardware threads), 1 if the count fails
         if (numWorkers == 0) return error.InvalidNumWorkers;
+        // a plate of 0 blocks would never advance
+        if (blocksPerPlate == 0) return error.InvalidBlocksPerPlate;
         const cpuCount = std.Thread.getCpuCount() catch 1;
 
         const structure = try read.getStructure(allocator, io, file);
@@ -65,8 +77,8 @@ pub const Dequantizer = struct {
         const jobs = try makeJobs(allocator, &structure.map.value.map);
         errdefer allocator.free(jobs);
 
-        //const outputHeader = try buildHeader(allocator, jobs, structure.metadata.value);
-        //errdefer allocator.free(outputHeader);
+        const outputHeader = try buildHeader(allocator, jobs, structure.metadata.value);
+        errdefer allocator.free(outputHeader);
 
         // One mini-job decodes chunkSize packed bytes into chunkSize * 8 bytes of f32
         const buffer = try allocator.alloc(u8, chunkSize * 8);
@@ -92,9 +104,11 @@ pub const Dequantizer = struct {
             .weightBuffer = weightBuffer,
             .structure = structure,
             .jobs = jobs,
-            // .outputHeader = outputHeader, // outputheader will not be computed for now
+            .outputHeader = outputHeader,
             .chunkSize = chunkSize,
             .numWorkers = @min(numWorkers, cpuCount),
+            .blocksPerPlate = blocksPerPlate,
+            .minBlocksForWorkers = minBlocksForWorkers,
         };
     }
 
@@ -102,7 +116,7 @@ pub const Dequantizer = struct {
         self.allocator.free(self.interface.buffer);
         self.allocator.free(self.scaleBuffer);
         self.allocator.free(self.weightBuffer);
-        // self.allocator.free(self.outputHeader);
+        self.allocator.free(self.outputHeader);
         self.allocator.free(self.jobs);
         self.structure.deinit();
     }
@@ -115,17 +129,10 @@ pub const Dequantizer = struct {
         // stream is called within streamRemaining
         // what it does is that it calls the stream funct that will drop a most one mini-job in the r.buffer
         // (see reader interface)
-        _ = w;
-        _ = limit;
+        // w and limit are only used for the header, the jobs go through r.buffer
 
         // Retrieve the parent struct from the pointer to the reader
         const self: *Dequantizer = @fieldParentPtr("interface", r);
-
-        // if the jobs are finished, then we don't have to stream anymore
-        if (self.jobIndex >= self.jobs.len) return error.EndOfStream;
-
-        // Retrieve the job to be done
-        const currentJob = self.jobs[self.jobIndex];
 
         // when we have consumed all the bytes in the buffer
         if (r.seek == r.end) {
@@ -133,12 +140,25 @@ pub const Dequantizer = struct {
             r.end = 0;
         }
 
+        // when streaming starts, the header of the output file goes straight to the writer, before the first job
+        if (self.headerPos < self.outputHeader.len) {
+            const written = try w.write(limit.slice(self.outputHeader[self.headerPos..]));
+            self.headerPos += written;
+            return written;
+        }
+
+        // if the jobs are finished, then we don't have to stream anymore
+        if (self.jobIndex >= self.jobs.len) return error.EndOfStream;
+
+        // Retrieve the job to be done
+        const currentJob = self.jobs[self.jobIndex];
+
         // do something depending on the job type
         switch (currentJob.action) {
             .copy => |info| {
                 // get the length of the copy job
                 const copyLen = info.data_offsets[1] - info.data_offsets[0];
-                // Free the space already taken in the buffer
+                // Take the space remaining in the buffer (could have also used limit)
                 const buffer = r.buffer[r.end..];
 
                 // Get the real length of the mini-job, which is the minimum between the chunkSize and the bytes left to copy.
@@ -217,9 +237,10 @@ pub const Dequantizer = struct {
                 if (nbBytesWeights != miniJobSize) return error.ReadFailed;
 
                 // now we can compute the mini-jobs sequentially and write them directly into the writing buffer
-
-                //simd.fromBufferToWorker();
-
+                simd.bufferToWorker(self.io, weights, scaleBufferSlice, self.scale2, buffer, self.numWorkers, self.blocksPerPlate, self.minBlocksForWorkers) catch |err| {
+                    self.err = err;
+                    return error.ReadFailed;
+                };
                 // std.debug.print("buffer {any} \n", .{self.weightBuffer[0..miniJobSize]});
                 // std.debug.print("scale buffer {any} \n", .{scaleBufferSlice});
 
@@ -265,8 +286,8 @@ test "copy stream" {
     const file = try writeFakeFile(io, tmp.dir, json, &body);
     defer file.close(io);
 
-    // chunkSize 8: the 16-byte job takes 2 mini-jobs, so pos and the job rollover get exercised
-    var dequantizer = try Dequantizer.init(allocator, io, file, 8, 1);
+    // Using the dequantizer with 8 chunksize and 1 gpu
+    var dequantizer = try Dequantizer.init(allocator, io, file, 8, 1, 256, 8192);
     defer dequantizer.deinit();
 
     // Exactly one copy job of 16 bytes
@@ -276,14 +297,17 @@ test "copy stream" {
     try std.testing.expectEqual(16, info.data_offsets[1] - info.data_offsets[0]);
 
     // The 16 bytes come out unchanged
-    var output: [16]u8 = undefined;
+    // room for the header (built in init, its content is tested in dispatch/header.zig) and the 16 bytes
+    var output: [512]u8 = undefined;
     var writer: Io.Writer = .fixed(&output);
     const nbBytes = try dequantizer.interface.streamRemaining(&writer);
+    const headerLength = dequantizer.outputHeader.len;
 
-    // expect the job to be done and the output to match the input
-    try std.testing.expectEqual(16, nbBytes);
-    // expect the output to match the input
-    try std.testing.expectEqualSlices(u8, &body, writer.buffered());
+    // expect the header then the job
+    try std.testing.expectEqual(headerLength + 16, nbBytes);
+    try std.testing.expectEqualSlices(u8, dequantizer.outputHeader, writer.buffered()[0..headerLength]);
+    // expect the data to match the input
+    try std.testing.expectEqualSlices(u8, &body, writer.buffered()[headerLength..]);
 }
 
 test "dequantize stream" {
@@ -335,13 +359,46 @@ test "dequantize stream" {
     defer file.close(io);
 
     // chunkSize 8: the 16-byte job takes 2 mini-jobs, so pos and the job rollover get exercised
-    var dequantizer = try Dequantizer.init(allocator, io, file, 8, 1);
+    var dequantizer = try Dequantizer.init(allocator, io, file, 8, 1, 256, 8192);
     defer dequantizer.deinit();
 
-    var output: [16]u8 = undefined;
+    // the header, then 16 bytes of the norm copy, then 32 packed bytes x 2 values x 4 bytes of f32 = 256
+    var output: [1024]u8 = undefined;
     var writer: Io.Writer = .fixed(&output);
     const nbBytes = try dequantizer.interface.streamRemaining(&writer);
+    const headerLength = dequantizer.outputHeader.len;
+    try std.testing.expectEqual(headerLength + 272, nbBytes);
+    try std.testing.expectEqualSlices(u8, dequantizer.outputHeader, writer.buffered()[0..headerLength]);
+    // the data starts right after the header
+    const data = writer.buffered()[headerLength..];
 
-    // expect the job to be done and the output to match the input
-    try std.testing.expectEqual(16, nbBytes);
+    // the norm weight is copied unchanged
+    try std.testing.expectEqualSlices(u8, body[8..24], data[0..16]);
+
+    // the dequantized weight: e2m1 x e4m3 x scale2 for each nibble, low nibble first
+    // scale2 = 3.7202382e-05 (bytes 193, 9, 28, 56), one e4m3 scale per 8 bytes
+    // computed exactly then rounded once to f32 (generated by claude)
+    const answers = [64]f32{
+        // block 0: scale 0x38 = 1.0, bytes 16, 50, 84, 118, 152, 186, 220, 254
+        0.0,           0.000018601191,    0.000037202382,   0.000055803575,    0.000074404765,   0.00011160715,     0.00014880953,    0.0002232143,
+        -0.0,          -0.000018601191,   -0.000037202382,  -0.000055803575,   -0.000074404765,  -0.00011160715,    -0.00014880953,   -0.0002232143,
+        // block 1: scale 0x3F = 1.875, bytes 239, 205, 171, 137, 103, 69, 35, 1
+        -0.0004185268, -0.00027901787,    -0.0002092634,    -0.00013950893,    -0.0001046317,    -0.00006975447,    -0.000034877234,  -0.0,
+        0.0004185268,  0.00027901787,     0.0002092634,     0.00013950893,     0.0001046317,     0.00006975447,     0.000034877234,   0.0,
+        // block 2: scale 0x01 = 2^-9 (subnormal), bytes 16, 50, 84, 118, 152, 186, 220, 254
+        0.0,           0.00000003633045,  0.0000000726609,  0.00000010899136,  0.0000001453218,  0.00000021798272,  0.0000002906436,  0.00000043596543,
+        -0.0,          -0.00000003633045, -0.0000000726609, -0.00000010899136, -0.0000001453218, -0.00000021798272, -0.0000002906436, -0.00000043596543,
+        // block 3: scale 0x7E = 448.0, bytes 247 (0xF7: +6 then -6)
+        0.1,           -0.1,              0.1,              -0.1,              0.1,              -0.1,              0.1,              -0.1,
+        0.1,           -0.1,              0.1,              -0.1,              0.1,              -0.1,              0.1,              -0.1,
+    };
+
+    var index: usize = 0;
+    while (index < answers.len) : (index += 1) {
+        // bitcasting to f32 on each group of four bits
+        const current: f32 = @bitCast(std.mem.readInt(u32, data[16 + 4 * index ..][0..4], .little));
+        std.testing.expectApproxEqRel(answers[index], current, 1e-6) catch |err| {
+            return err;
+        };
+    }
 }
