@@ -41,7 +41,7 @@
     - [30/10/2026](#30102026)
   - [Closed Questions](#closed-questions)
   - [What I could have improved in my project handling](#what-i-could-have-improved-in-my-project-handling)
-  - [What I'm not going to do](#what-im-not-going-to-do)
+  - [What I&#39;m not going to do](#what-im-not-going-to-do)
 
 ## Project
 
@@ -564,11 +564,11 @@ I built this project like it would be a long project, and I really like the arch
 
 The benchmarks and tests are really the weak parts of the project. I relied too much on Claude for them because I felt very overwhelmed by the quantity of information I had to take in. If I had to do it again, I would definitely start smaller, maybe with other small projects before starting the main.
 
-I'm really glad of the way I structured the whole application, it really took me back to my C++ days which felt really good. 
+I'm really glad of the way I structured the whole application, it really took me back to my C++ days which felt really good.
 
-Maybe the multi-core part is not the most intelligent way of doing things, maybe I could have served many mini-jobs instead of the groups? 
+Maybe the multi-core part is not the most intelligent way of doing things, maybe I could have served many mini-jobs instead of the groups?
 
-I'm thinking about how the disk sits idle while the decode happens, and I feel like copy job could occur concurrently to the writing jobs, leading to really gains in the decode.
+I'm thinking about how the disk sits idle while the decode happens, and I feel like copy job could occur concurrently to the writing jobs, leading to really gains in the throughput.
 
 ## What I'm not going to do
 

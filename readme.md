@@ -120,7 +120,7 @@ The fastest memory I can access without too much overhead is the L3 cache memory
 - How do I know that the format is correct on a very large model? Here at low scale it's fine, but how could we error correct in case the weights are given wrong?
 - I made my decoder turn E4M3 0x7F into NaN, as the spec says. But some other implementations dictates that 0 is tolerable leading to faster ops. To investigate. Do models have NaN anywhere?
 - What about models that have different parts? How to handle tensor-1, ..., tensor-n? How to handle multiple files?
-- The disk sits idle while the workers decode. A copy job is pure I/O and a dequantize job is mostly compute, so the copy jobs could run concurrently with the decoding. The gain would be on the whole stream rather than on the decode itself. The catch is the order: the output header places the tensors in job order, so a copy that runs ahead has to be held in memory until its turn in the stream.
+- The disk sits idle while the workers decode. A copy job is pure I/O and a dequantize job is mostly compute, so the copy jobs could run concurrently with the decoding. The gain would be on the whole stream rather than on the decode itself. The devil is in the order, the output header places the tensors in job order, so a copy that runs ahead has to be held in memory until its turn in the stream. We could do copy and decode concurrently.
 
 ## Fair AI Contribution
 
