@@ -46,12 +46,34 @@ pub fn main(init: std.process.Init) !void {
     // Initialize the std.io interface
     const io = init.io;
 
-    // Initialize shared memory
+    // Allocate memory
     const allocator = init.arena.allocator();
-    const filename = "data/model.safetensors";
+
+    // Define iterator for the args
+    var it = try init.minimal.args.iterateAllocator(allocator);
+    defer it.deinit();
+
+    // Arg sys
+    var filename: ?[]const u8 = null;
+    _ = it.next(); // argv[0] is the program's own path
+    while (true) {
+        // Only advance the iterator here at the beginning of a fresh check
+        const arg = it.next() orelse break;
+        if (std.mem.eql(u8, arg, "--filename") or std.mem.eql(u8, arg, "-f")) {
+            filename = it.next() orelse return error.FileError;
+        }
+    }
+
+    // Stop before opening anything if the flag was never given
+    const inputFilename = filename orelse {
+        std.debug.print("./zig-out/bin/Dequantizer.exe -f data/model.safetensors > data/out.safetensors\n", .{});
+        std.process.exit(1);
+    };
+    // for windows
+    // cmd /c "zig-out\bin\Dequantizer.exe -f data\model.safetensors > data\out.safetensors
 
     // Open the file
-    const file = try Io.Dir.cwd().openFile(io, filename, .{});
+    const file = try Io.Dir.cwd().openFile(io, inputFilename, .{});
     defer file.close(io);
 
     // The dequantizer reads the structure, makes the jobs and builds the header
