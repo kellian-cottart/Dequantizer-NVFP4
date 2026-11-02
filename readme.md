@@ -30,8 +30,6 @@ All day-to-day improvements and learnings are in `logs.md`.
 - weight_scale_2 (F32, a scalar), one F32 per tensor.
 - Floating conversion, Value = e2m1 × e4m3 × scale2.
 
-### SIMD
-
 ![Formats](<Claude%20Benchmark/formats/formats.png>)
 
 - **E2M1:** I split each byte with `& 0x0F` for the low nibble and `>> 4` for the high one, then `@shuffle` puts them back in file order. From there I build the F32 bits directly, 16 lanes at a time. The sign goes to bit 31. For a normal value it's $E′ = e + 126$ and $M′ = m \times 2^{22}$. A subnormal (e = 0) can only be 0 or 0.5, so its bits are just `m × (126 << 23)`. Then `@select` takes one or the other depending on e.
