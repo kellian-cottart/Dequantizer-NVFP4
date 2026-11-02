@@ -39,6 +39,17 @@ All day-to-day improvements and learnings are in `logs.md`.
 
 ## The architecture
 
+```md
+src
+│   ├───backend
+│   │   ├───scalar => computing nvfp4 not using simd
+│   │   └───simd => with simd
+│   └───dispatch => header & job
+├─── dequantizer => main object interface 
+├─── read => everything related to reading a file / parsing
+└─── main => initializer and parsing args
+```
+
 - The Dequantizer init parses the header, makes the jobs, builds the output header and allocates the buffers for one mini-job.
 - A job is a tensor. Either I copy it as it is, or it's an NVFP4 group and I dequantize it. For the NVFP4 groups the job sits on the weight, and the scales don't get a job of their own. The jobs are sorted by their offset in the input, so I read the file from start to end.
 - A mini-job is one call to stream(). For a copy, it reads up to chunkSize bytes (512 KiB) with readPositionalAll. For a dequantize, it reads scale2 once at the start of the job, then chunkSize/8 scales and chunkSize bytes of weights, and writes 8 times more bytes of F32 (4 MB).
